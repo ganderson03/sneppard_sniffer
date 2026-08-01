@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Prompt Injection Sniffer</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="bar__mark">◆</span>
+      <span class="bar__title">PROMPT INJECTION SNIFFER</span>
+      <span class="bar__version">v0.1.0</span>
+    </header>
+
+    <section id="status" class="status status--unknown">
+      <div class="status__level" id="status-level">—</div>
+      <p class="status__summary" id="status-summary">Checking this page…</p>
+      <p class="status__host" id="status-host"></p>
+    </section>
+
+    <main id="body">
+      <div id="empty" class="empty" hidden>
+        <p class="empty__line">No hidden instructions found on this page.</p>
+        <p class="empty__note">
+          This page has nothing that looks like text written to manipulate an AI
+          assistant reading it on your behalf.
+        </p>
+      </div>
+
+      <div id="notice" class="notice" hidden></div>
+
+      <ul id="findings" class="findings"></ul>
+    </main>
+
+    <footer class="foot">
+      <button id="rescan" class="btn" type="button">RE-SCAN PAGE</button>
+      <a class="foot__link" href="https://sneppard.dev" target="_blank" rel="noreferrer noopener">
+        sneppard.dev
+      </a>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
