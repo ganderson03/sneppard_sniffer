@@ -1,5 +1,5 @@
 /**
- * Prompt Injection Sniffer - popup.
+ * Sneppard Sniffer - popup.
  *
  * Reads whatever the content script last stored for the active tab and renders
  * it. No inline handlers, no innerHTML with page-derived strings: every piece
@@ -13,6 +13,18 @@ const LEVEL_COPY = {
   high: 'This page is actively trying to give instructions to an AI assistant.'
 };
 
+const VECTOR_COPY = {
+  hidden_css: 'hidden by CSS',
+  offscreen: 'off-screen',
+  comment: 'HTML comment',
+  attribute: 'attribute',
+  meta: 'meta tag',
+  unicode: 'invisible characters',
+  homoglyph: 'disguised characters',
+  template: 'inert container',
+  visible: 'visible text'
+};
+
 const RESCAN_TIMEOUT_MS = 3000;
 const RESCAN_POLL_MS = 150;
 
@@ -21,6 +33,7 @@ const els = {
   level: document.getElementById('status-level'),
   summary: document.getElementById('status-summary'),
   host: document.getElementById('status-host'),
+  vectors: document.getElementById('vectors'),
   empty: document.getElementById('empty'),
   notice: document.getElementById('notice'),
   findings: document.getElementById('findings'),
@@ -28,6 +41,9 @@ const els = {
 };
 
 function summaryFor(result) {
+  if (result.level === 'error') {
+    return 'The scanner could not finish on this page.';
+  }
   if (result.level === 'safe' || result.findingCount === 0) return LEVEL_COPY.safe;
   const n = result.findingCount;
   const noun = n === 1 ? 'suspicious pattern' : 'suspicious patterns';
@@ -100,26 +116,54 @@ function showNotice(text) {
   els.notice.hidden = false;
 }
 
+/** One-line coverage breakdown: which vectors fired, and how often. */
+function showVectors(result) {
+  const counts = result && result.vectors ? result.vectors : null;
+  const entries = counts ? Object.entries(counts) : [];
+  if (entries.length === 0) {
+    els.vectors.hidden = true;
+    els.vectors.textContent = '';
+    return;
+  }
+  els.vectors.textContent = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([vector, n]) => `${VECTOR_COPY[vector] || vector} ×${n}`)
+    .join('  ·  ');
+  els.vectors.hidden = false;
+}
+
 function render(result) {
   els.findings.replaceChildren();
 
   if (!result) {
-    setStatus('unknown', 'NO DATA', 'This page has not been scanned. Browser pages and the Chrome Web Store cannot be scanned.', '');
+    setStatus(
+      'unknown',
+      'NO DATA',
+      'This page has not been scanned. Browser pages and the Chrome Web Store cannot be scanned.',
+      ''
+    );
     els.empty.hidden = true;
+    showVectors(null);
     showNotice(null);
     return;
   }
 
-  setStatus(result.level, result.level.toUpperCase(), summaryFor(result), hostFor(result));
+  const levelText = result.level === 'error' ? 'ERROR' : result.level.toUpperCase();
+  setStatus(result.level, levelText, summaryFor(result), hostFor(result));
 
   const hasFindings = result.findings && result.findings.length > 0;
-  els.empty.hidden = hasFindings;
+  els.empty.hidden = hasFindings || result.level === 'error';
+  showVectors(result);
 
-  showNotice(
-    result.truncated
-      ? `Showing the ${result.findings.length} highest-scoring of ${result.findingCount} findings.`
-      : null
-  );
+  if (result.level === 'error') {
+    showNotice(result.error ? `Scanner error: ${result.error}` : 'Scanner error.');
+  } else if (result.truncated) {
+    showNotice(
+      `Showing the ${result.findings.length} highest-scoring of ${result.findingCount} findings.`
+    );
+  } else {
+    showNotice(null);
+  }
 
   if (!hasFindings) return;
 
@@ -174,7 +218,9 @@ async function rescan() {
     if (!result) showNotice('Re-scan timed out. The page may still be loading.');
   } catch (err) {
     render(before);
-    showNotice('This page cannot be scanned. Chrome blocks extensions on browser and Web Store pages.');
+    showNotice(
+      'This page cannot be scanned. Chrome blocks extensions on browser and Web Store pages.'
+    );
   } finally {
     els.rescan.disabled = false;
     els.rescan.textContent = 'RE-SCAN PAGE';

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Prompt Injection Sniffer",
-  "version": "0.1.0",
+  "name": "Sneppard Sniffer",
+  "version": "0.2.0",
   "description": "Detects hidden text and prompt injection patterns on web pages that could hijack AI browser assistants.",
   "permissions": ["activeTab", "storage", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
@@ -13,8 +13,24 @@
       "run_at": "document_idle"
     }
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/patterns.js"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "action": {
     "default_popup": "src/popup.html",
-    "default_title": "Prompt Injection Sniffer"
+    "default_title": "Sneppard Sniffer",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
   }
 }

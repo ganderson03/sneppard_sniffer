@@ -1,15 +1,21 @@
 /**
- * Prompt Injection Sniffer - content script / detector
+ * Sneppard Sniffer - content script / detector
  *
  * Read-only scanner. It never modifies the page. It walks the live DOM looking
  * for text that reads like an instruction aimed at an AI assistant, then checks
  * whether that text was deliberately concealed from human eyes (hidden CSS,
- * off-screen positioning, comment nodes, attributes, meta tags).
+ * off-screen positioning, comment nodes, attributes, meta tags, inert
+ * containers, invisible Unicode, mixed-script homoglyphs).
  *
- * Design note: a finding always requires at least one keyword match. A hidden
- * element on its own is not evidence of anything - the whole web hides things
- * with display:none. Concealment raises the score of text that already looks
- * like an injection attempt.
+ * Two rules hold everywhere except the Unicode vector:
+ *   1. A finding always requires a keyword hit. A hidden element on its own is
+ *      not evidence of anything - the whole web hides things with display:none.
+ *   2. Plainly visible text is only reported when it trips a weight >= 9
+ *      pattern, so an article about prompt injection does not light up.
+ *
+ * The Unicode vector is the deliberate exception: runs of zero-width or Unicode
+ * tag characters in body text are almost never legitimate, so they are reported
+ * on their own.
  */
 
 (() => {
@@ -17,8 +23,8 @@
 
   // Re-injection via chrome.scripting.executeScript lands in the same isolated
   // world, so a second run would double up observers. Reuse the first instance.
-  if (window.__PROMPT_INJECTION_SNIFFER__) {
-    window.__PROMPT_INJECTION_SNIFFER__.rescan('manual');
+  if (window.__SNEPPARD_SNIFFER__) {
+    window.__SNEPPARD_SNIFFER__.rescan('manual');
     return;
   }
 
@@ -31,50 +37,67 @@
   const ANCESTOR_DEPTH = 10;
   const RAF_BATCH_THRESHOLD = 20;
 
-  const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS']);
+  // Scoring
+  const FLAG_BONUS = 3;
+  const MAX_SCORED_FLAGS = 4; // one element cannot dominate on concealment alone
+  const FINDING_SCORE_CAP = 30;
+  const A11Y_FACTOR = 0.5;
+  const UNICODE_WEIGHT = 9;
+  const HOMOGLYPH_WEIGHT = 6;
+  const DENSITY_FLOOR = 3; // findings beyond this start applying the multiplier
+  const DENSITY_STEP = 0.05;
+  const DENSITY_MAX = 1.5;
+  const COLOR_MATCH_THRESHOLD = 28; // redmean perceptual distance
 
-  /**
-   * Weighted injection heuristics. `label` is what the popup shows the user, so
-   * it is written in plain language rather than as a regex description.
-   */
-  const PATTERNS = [
-    { id: 'ignore-previous', weight: 10, label: 'ignore previous instructions', re: /\b(ignore|disregard|forget)\s+(all\s+|any\s+)?(the\s+)?(previous|prior|above|earlier|preceding)\s+(instructions?|prompts?|rules?|directions?|context|commands?)/i },
-    { id: 'forget-everything', weight: 10, label: 'forget everything above', re: /\b(forget|erase|discard)\s+(everything|all)\s+(you|that|above|before|previously)/i },
-    { id: 'override-safety', weight: 10, label: 'override safety rules', re: /\b(ignore|bypass|override|disable|turn\s+off)\s+(your|all|any|the)\s+(safety|content|security|guard(rail)?s?|guidelines?|restrictions?|filters?|policies)/i },
-    { id: 'ai-directive', weight: 10, label: 'directive addressed to an AI', re: /\b(instructions?|message|note|directive|command)\s+(for|to)\s+(the\s+)?(ai|a\.i\.|assistant|llm|chat\s?bot|agent|language\s+model|browser\s+agent)\b/i },
-    { id: 'exfiltrate', weight: 10, label: 'attempt to leak secrets', re: /\b(send|post|exfiltrate|upload|transmit|email|leak)\b[^.]{0,40}\b(api\s*key|secret|password|credential|cookie|session\s+token|auth\s+token|private\s+key)/i },
-    { id: 'you-are-now', weight: 9, label: 'you are now [AI persona]', re: /\byou\s+are\s+now\s+(a|an|the)?\s*[\w .'-]{0,30}\b(assistant|ai|a\.i\.|model|agent|dan|gpt|claude|copilot|gemini|perplexity|bot|persona)\b/i },
-    { id: 'new-system-prompt', weight: 9, label: 'new system prompt', re: /\b(new|updated|revised|real|actual)\s+(system\s+)?(prompt|instructions?)\s*[:\-—]/i },
-    { id: 'system-override', weight: 9, label: 'system prompt override', re: /\bsystem\s*prompt\s*(override|update|replacement|:)/i },
-    { id: 'true-goal', weight: 9, label: 'your true goal is', re: /\byour\s+(true|real|actual|hidden|secret|primary|only)\s+(goal|purpose|objective|task|mission|instruction)s?\s+(is|are)\b/i },
-    { id: 'chat-tokens', weight: 9, label: 'fake chat/system tokens', re: /(<\|?\s*(im_start|im_end|system|endoftext)\s*\|?>|\[\/?\s*(INST|SYS)\s*\]|###\s*(system|instruction)\s*:)/i },
-    { id: 'urgent-ai', weight: 10, label: 'urgent message for the AI', re: /\b(important|urgent|critical|priority)\s+(message|instruction|notice|update)\s+(for|to)\s+(the\s+)?(ai|assistant|llm|agent|model)/i },
-    { id: 'dont-tell-user', weight: 8, label: "don't tell the user", re: /\b(do\s+not|don'?t|never)\s+(tell|inform|notify|alert|show)\s+(the\s+)?(user|human|person|reader)/i },
-    { id: 'jailbreak', weight: 8, label: 'jailbreak', re: /\bjail\s?break(ing|ed)?\b/i },
-    { id: 'when-asked-say', weight: 8, label: 'when asked X, say Y', re: /\bwhen(ever)?\s+(you\s+are\s+)?(asked|the\s+user\s+asks|prompted)\b[^.!?]{0,80}\b(say|reply|respond|answer|tell|output|recommend)\b/i },
-    { id: 'end-of-prompt', weight: 8, label: 'fake end-of-prompt marker', re: /\b(end\s+of\s+(the\s+)?(system\s+)?(prompt|instructions?)|begin\s+new\s+instructions?)\b/i },
-    { id: 'override-previous', weight: 8, label: 'override previous rules', re: /\boverrid(e|ing)\s+(all\s+)?(previous|prior|existing|earlier|default)\b/i },
-    { id: 'do-not-reveal', weight: 7, label: 'do not reveal', re: /\b(do\s+not|don'?t|never)\s+(reveal|disclose|mention|repeat|summari[sz]e|quote|display)\b/i },
-    { id: 'system-bracket', weight: 7, label: 'fake [system] block', re: /\[\s*(system|admin|developer|root)\s*\]\s*[:\-]?/i },
-    { id: 'must-comply', weight: 7, label: 'you must comply', re: /\byou\s+(must|shall|have\s+to)\s+(now\s+)?(comply|obey|follow|execute|perform|do)\b/i },
-    { id: 'dan', weight: 6, label: 'DAN prompt', re: /\bDAN\b(?!\w)/ },
-    { id: 'developer-mode', weight: 6, label: 'developer mode', re: /\bdeveloper\s+mode\s+(enabled|on|activated)\b/i },
-    { id: 'pretend', weight: 6, label: 'pretend to be', re: /\bpretend\s+(to\s+be|that\s+you|you\s+are)\b/i },
-    { id: 'respond-only-with', weight: 6, label: 'respond only with', re: /\b(reply|respond|answer|output|say)\s+only\s+(with|the\s+following)\b/i },
-    { id: 'navigate-to', weight: 6, label: 'instructs AI to visit a URL', re: /\b(navigate|browse|go|redirect)\s+to\s+https?:\/\//i },
-    { id: 'act-as', weight: 5, label: 'act as', re: /\bact\s+as\s+(a|an|the|if)\b/i },
-    { id: 'roleplay', weight: 5, label: 'roleplay as', re: /\brole\s?play\s+as\b/i },
-    { id: 'from-now-on', weight: 5, label: 'from now on', re: /\bfrom\s+now\s+on\s*[,:]/i }
-  ];
+  const SKIP_TAGS = new Set([
+    'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS',
+    'OPTION', 'OPTGROUP', 'SELECT', 'DATALIST'
+  ]);
 
-  const ATTRIBUTES = ['alt', 'aria-label', 'title', 'placeholder', 'data-tooltip'];
+  // Accessibility utility classes. Screen-reader-only text is legitimately
+  // invisible, but attackers do hide behind the convention, so findings on
+  // these elements are halved rather than dropped.
+  const A11Y_CLASS = /(^|[\s_-])(sr[-_]?only|visually[-_]?hidden|visuallyhidden|screen[-_]?reader[-_]?text|a11y[-_]?hidden|hidden[-_]?visually|assistive[-_]?text)([\s_-]|$)/i;
 
-  const TYPE_LABELS = {
-    hidden: 'Hidden element',
+  // Zero-width, word-joiner, BOM, and the Unicode tag block (U+E0000-U+E007F)
+  // used to smuggle ASCII text that renders as nothing at all.
+  const INVISIBLE_CHARS = /[​-‍⁠﻿]|[\u{E0000}-\u{E007F}]/gu;
+  const INVISIBLE_RUN = /(?:[​-‍⁠﻿]{3,})|(?:[\u{E0000}-\u{E007F}]{3,})/u;
+  const TAG_CHARS = /[\u{E0000}-\u{E007F}]/gu;
+  const BIDI_CONTROLS = /[‪-‮⁦-⁩]/g;
+
+  const LATIN = /[A-Za-z]/;
+  const CYRILLIC = /[Ѐ-ӿ]/;
+  const GREEK = /[Ͱ-Ͽ]/;
+
+  // Lookalikes used to slip keyword filters. Folding these before matching is
+  // what makes the homoglyph vector work at all - the raw text would never hit
+  // an ASCII pattern.
+  const CONFUSABLES = {
+    'а': 'a', 'в': 'b', 'е': 'e', 'к': 'k', 'м': 'm',
+    'н': 'h', 'о': 'o', 'р': 'p', 'с': 'c', 'т': 't',
+    'у': 'y', 'х': 'x', 'і': 'i', 'ј': 'j', 'ѕ': 's',
+    'ԁ': 'd', 'һ': 'h', 'ԛ': 'q', 'ѡ': 'w',
+    'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M',
+    'Н': 'H', 'О': 'O', 'Р': 'P', 'С': 'C', 'Т': 'T',
+    'У': 'Y', 'Х': 'X', 'Ѕ': 'S', 'І': 'I', 'Ј': 'J',
+    'α': 'a', 'ε': 'e', 'ι': 'i', 'κ': 'k', 'ν': 'v',
+    'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'u', 'γ': 'y',
+    'ς': 's', 'Α': 'A', 'Β': 'B', 'Ε': 'E', 'Ζ': 'Z',
+    'Η': 'H', 'Ι': 'I', 'Κ': 'K', 'Μ': 'M', 'Ν': 'N',
+    'Ο': 'O', 'Ρ': 'P', 'Τ': 'T', 'Υ': 'Y', 'Χ': 'X'
+  };
+  const CONFUSABLE_RE = new RegExp(`[${Object.keys(CONFUSABLES).join('')}]`, 'g');
+
+  const VECTORS = {
+    hidden_css: 'Hidden element',
     offscreen: 'Off-screen element',
     comment: 'HTML comment',
     attribute: 'Attribute injection',
     meta: 'Meta tag',
+    unicode: 'Invisible characters',
+    homoglyph: 'Disguised characters',
+    template: 'Inert container',
     visible: 'Visible text'
   };
 
@@ -83,7 +106,7 @@
     'visibility:hidden': 'visibility:hidden',
     'opacity<0.05': 'near-zero opacity',
     'font-size<2px': 'micro font size',
-    'color=background': 'text colour matches background',
+    'color=background': 'text colour matches its background',
     'transparent-text': 'transparent text',
     'height:0': 'zero height',
     'width:0': 'zero width',
@@ -96,25 +119,56 @@
     'offscreen-top': 'positioned far off-screen (top)'
   };
 
+  const ATTRIBUTES = ['alt', 'aria-label', 'title', 'placeholder'];
+
+  // Framing that marks visible text as writing *about* injection rather than an
+  // attempt at it. Only ever applied to plainly visible text - concealment
+  // always wins, because nobody hides a worked example.
+  const EXPLANATORY = /\b(for example|for instance|such as|e\.g\.|i\.e\.|phrases? like|words? like|text like|things like|looks? like this|known as|called|referred to as|example of|demonstrat(e|es|ing|ion)|attackers?|adversar(y|ial)|malicious|prompt injection|injection attack)\b/i;
+  const QUOTE_CONTAINERS = 'blockquote, q, code, pre, samp, kbd, figure, cite, .quote, .example';
+  const QUOTED_SPAN = /["“”'‘’«»][^"“”'‘’«»]{5,}["“”'‘’«»]/g;
+
+  // ------------------------------------------------------------ pattern load
+
+  let patterns = null;
+
+  async function loadPatterns() {
+    if (patterns) return patterns;
+    const mod = await import(chrome.runtime.getURL('src/patterns.js'));
+    patterns = mod.PATTERNS;
+    return patterns;
+  }
+
   // ---------------------------------------------------------------- utilities
 
+  function stripInvisible(text) {
+    return text.replace(INVISIBLE_CHARS, '').replace(BIDI_CONTROLS, '');
+  }
+
+  function normalise(text) {
+    return stripInvisible(text).replace(/\s+/g, ' ').trim();
+  }
+
+  /** Fold Cyrillic/Greek lookalikes to Latin so disguised keywords still match. */
+  function fold(text) {
+    return text.replace(CONFUSABLE_RE, (ch) => CONFUSABLES[ch] || ch);
+  }
+
+  function isMixedScript(text) {
+    return LATIN.test(text) && (CYRILLIC.test(text) || GREEK.test(text));
+  }
+
   function matchPatterns(text) {
+    const folded = fold(text);
     const hits = [];
     let score = 0;
-    for (const p of PATTERNS) {
-      if (p.re.test(text)) {
+    for (const p of patterns) {
+      if (p.re.test(folded)) {
         hits.push({ id: p.id, label: p.label, weight: p.weight });
         score += p.weight;
       }
     }
     return { hits, score };
-  }
-
-  function normalise(text) {
-    return text
-      .replace(/[​-‏‪-‮⁠﻿]/g, '') // zero-width / bidi
-      .replace(/\s+/g, ' ')
-      .trim();
   }
 
   function preview(text) {
@@ -138,6 +192,7 @@
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
   }
 
+  /** Nearest ancestor background that is actually opaque enough to see. */
   function effectiveBackground(el) {
     let node = el;
     let depth = 0;
@@ -150,15 +205,54 @@
     return { r: 255, g: 255, b: 255, a: 1 };
   }
 
-  function colorDistance(a, b) {
-    return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b);
+  /**
+   * Redmean colour distance - a cheap perceptual approximation that behaves far
+   * better than raw RGB difference near the extremes. Comparing against the
+   * resolved ancestor background catches white-on-white, black-on-black and
+   * every off-brand pairing in between, rather than two hardcoded colours.
+   */
+  function perceptualDistance(a, b) {
+    const rm = (a.r + b.r) / 2;
+    const dr = a.r - b.r;
+    const dg = a.g - b.g;
+    const db = a.b - b.b;
+    return Math.sqrt((2 + rm / 256) * dr * dr + 4 * dg * dg + (2 + (255 - rm) / 256) * db * db);
+  }
+
+  function isA11yUtility(el) {
+    let node = el;
+    let depth = 0;
+    while (node && node.nodeType === 1 && depth < ANCESTOR_DEPTH) {
+      const cls = node.getAttribute('class');
+      if (cls && A11Y_CLASS.test(cls)) return true;
+      node = node.parentElement;
+      depth += 1;
+    }
+    return false;
   }
 
   /**
-   * Collect concealment flags for an element and its ancestors. Ancestors
-   * matter because `display:none` on a wrapper does not show up in the computed
-   * style of the child that actually holds the text.
+   * True when visible text is discussing injection rather than attempting it:
+   * sitting in a quotation/code container, framed by explanatory language, or
+   * only tripping strong patterns inside quotation marks.
    */
+  function isExplanatory(el, text) {
+    if (EXPLANATORY.test(text)) return true;
+    if (el && el.closest && el.closest(QUOTE_CONTAINERS)) return true;
+    const unquoted = text.replace(QUOTED_SPAN, ' ');
+    if (unquoted !== text) {
+      const { hits } = matchPatterns(unquoted);
+      if (!hits.some((h) => h.weight >= 9)) return true;
+    }
+    return false;
+  }
+
+  /** Content the page hides by design, where hiding carries no signal. */
+  function isLegitimatelyHidden(el) {
+    if (!el || !el.closest) return false;
+    return Boolean(el.closest('details:not([open]), select, option, optgroup, datalist'));
+  }
+
   function concealmentFlags(el) {
     const flags = new Set();
     let node = el;
@@ -192,7 +286,7 @@
         if (color) {
           if (color.a < 0.05) {
             flags.add('transparent-text');
-          } else if (colorDistance(color, effectiveBackground(node)) <= 24) {
+          } else if (perceptualDistance(color, effectiveBackground(node)) < COLOR_MATCH_THRESHOLD) {
             flags.add('color=background');
           }
         }
@@ -241,7 +335,34 @@
     return text;
   }
 
-  // ------------------------------------------------------------------ scanner
+  // ------------------------------------------------------------------ finding
+
+  function buildFinding(opts) {
+    const cssFlags = opts.flags.filter((f) => FLAG_LABELS[f]);
+    const otherFlags = opts.flags.filter((f) => !FLAG_LABELS[f]);
+    const scoredFlags = Math.min(cssFlags.length, MAX_SCORED_FLAGS);
+
+    let score = Math.min(opts.keywordScore + scoredFlags * FLAG_BONUS, FINDING_SCORE_CAP);
+    if (opts.a11y) score = Math.round(score * A11Y_FACTOR);
+
+    const flags = [...cssFlags.map((f) => FLAG_LABELS[f]), ...otherFlags];
+    if (cssFlags.length > MAX_SCORED_FLAGS) {
+      flags.push(`+${cssFlags.length - MAX_SCORED_FLAGS} more, not scored`);
+    }
+    if (opts.a11y) flags.push('accessibility utility class — score halved');
+
+    return {
+      vector: opts.vector,
+      typeLabel: VECTORS[opts.vector] || opts.vector,
+      element: opts.element,
+      preview: preview(opts.text),
+      keywords: opts.hits.map((h) => h.label),
+      flags,
+      score
+    };
+  }
+
+  // ------------------------------------------------------------------ vectors
 
   function collectTextCandidates() {
     const candidates = [];
@@ -255,13 +376,14 @@
       if (text.length < MIN_TEXT_LEN || text.length > MAX_TEXT_LEN) continue;
       const { hits, score } = matchPatterns(text);
       if (hits.length === 0) continue;
+      if (isLegitimatelyHidden(el)) continue;
       candidates.push({ el, text, hits, score });
     }
     return candidates;
   }
 
-  /** Style reads for keyword-matched elements. Layout-thrashing, so it is kept
-   *  in one pass and, above the batch threshold, deferred to an animation frame. */
+  /** Style reads for keyword-matched elements. Layout-thrashing, so kept to one
+   *  pass and, above the batch threshold, deferred to an animation frame. */
   function classifyCandidates(candidates) {
     const findings = [];
 
@@ -269,17 +391,43 @@
       const hidden = concealmentFlags(c.el);
       const offscreen = offscreenFlags(c.el);
       const flags = [...hidden, ...offscreen];
+      const hits = [...c.hits];
+      let keywordScore = c.score;
 
-      let type = 'visible';
-      if (hidden.size > 0) type = 'hidden';
-      else if (offscreen.size > 0) type = 'offscreen';
+      const mixed = isMixedScript(c.text);
+      if (mixed) {
+        hits.push({
+          id: 'homoglyph',
+          label: 'Latin mixed with Cyrillic/Greek lookalikes',
+          weight: HOMOGLYPH_WEIGHT
+        });
+        keywordScore += HOMOGLYPH_WEIGHT;
+        flags.push('disguised with lookalike characters');
+      }
 
-      // Plainly visible page text that merely discusses these phrases is not an
-      // attack - a security blog would light up like a christmas tree. Only
-      // report visible text when the wording is unambiguously an AI directive.
-      if (type === 'visible' && !c.hits.some((h) => h.weight >= 9)) continue;
+      let vector = 'visible';
+      if (hidden.size > 0) vector = 'hidden_css';
+      else if (offscreen.size > 0) vector = 'offscreen';
+      else if (mixed) vector = 'homoglyph';
 
-      findings.push(buildFinding(type, c.text, c.hits, c.score, flags, describe(c.el)));
+      // Rule 2: visible text needs an unambiguous pattern, and must not read as
+      // an article explaining what an injection looks like.
+      if (vector === 'visible') {
+        if (!hits.some((h) => h.weight >= 9)) continue;
+        if (isExplanatory(c.el, c.text)) continue;
+      }
+
+      findings.push(
+        buildFinding({
+          vector,
+          text: c.text,
+          hits,
+          keywordScore,
+          flags,
+          element: describe(c.el),
+          a11y: isA11yUtility(c.el)
+        })
+      );
     }
 
     return findings;
@@ -295,9 +443,16 @@
       if (text.length >= MIN_TEXT_LEN && text.length <= MAX_TEXT_LEN) {
         const { hits, score } = matchPatterns(text);
         if (hits.length > 0) {
-          const owner = node.parentElement;
           findings.push(
-            buildFinding('comment', text, hits, score, ['html-comment'], `<!-- --> in ${describe(owner)}`)
+            buildFinding({
+              vector: 'comment',
+              text,
+              hits,
+              keywordScore: score,
+              flags: ['hidden in an HTML comment'],
+              element: `<!-- --> in ${describe(node.parentElement)}`,
+              a11y: false
+            })
           );
         }
       }
@@ -308,19 +463,34 @@
 
   function scanAttributes() {
     const findings = [];
-    const selector = ATTRIBUTES.map((a) => `[${a}]`).join(',');
-    const nodes = document.querySelectorAll(selector);
+    const nodes = document.querySelectorAll('*');
+    const limit = Math.min(nodes.length, MAX_ELEMENTS);
 
-    for (let i = 0; i < nodes.length && i < MAX_ELEMENTS; i += 1) {
+    for (let i = 0; i < limit; i += 1) {
       const el = nodes[i];
-      for (const attr of ATTRIBUTES) {
-        const raw = el.getAttribute(attr);
-        if (!raw) continue;
-        const text = normalise(raw);
+      if (!el.attributes || el.attributes.length === 0) continue;
+
+      for (const attr of el.attributes) {
+        const named = ATTRIBUTES.includes(attr.name);
+        const isData = attr.name.startsWith('data-');
+        if (!named && !isData) continue;
+
+        const text = normalise(attr.value || '');
         if (text.length < MIN_TEXT_LEN || text.length > MAX_TEXT_LEN) continue;
         const { hits, score } = matchPatterns(text);
         if (hits.length === 0) continue;
-        findings.push(buildFinding('attribute', text, hits, score, [`${attr} attribute`], describe(el)));
+
+        findings.push(
+          buildFinding({
+            vector: 'attribute',
+            text,
+            hits,
+            keywordScore: score,
+            flags: [`${attr.name} attribute`],
+            element: describe(el),
+            a11y: isA11yUtility(el)
+          })
+        );
       }
     }
     return findings;
@@ -334,30 +504,156 @@
       const { hits, score } = matchPatterns(text);
       if (hits.length === 0) continue;
       const name = meta.getAttribute('name') || meta.getAttribute('property') || 'meta';
-      findings.push(buildFinding('meta', text, hits, score, ['meta content'], `<meta name="${name}">`));
+      findings.push(
+        buildFinding({
+          vector: 'meta',
+          text,
+          hits,
+          keywordScore: score,
+          flags: ['meta content'],
+          element: `<meta name="${name}">`,
+          a11y: false
+        })
+      );
     }
     return findings;
   }
 
-  function buildFinding(type, text, hits, keywordScore, flags, element) {
-    const cssFlags = flags.filter((f) => FLAG_LABELS[f]);
-    const score = keywordScore + cssFlags.length * 3;
-    return {
-      type,
-      typeLabel: TYPE_LABELS[type] || type,
-      element,
-      preview: preview(text),
-      keywords: hits.map((h) => h.label),
-      flags: flags.map((f) => FLAG_LABELS[f] || f),
-      score
-    };
+  /**
+   * <template>, <noscript> and unslotted <slot> fallback content is never shown
+   * to a human in a normal browser, but it sits in the markup where scrapers
+   * and some AI page readers will happily pick it up.
+   */
+  function scanInertContainers() {
+    const findings = [];
+
+    const sources = [];
+    for (const el of document.querySelectorAll('template')) {
+      sources.push({
+        el,
+        text: el.content ? el.content.textContent || '' : '',
+        note: 'inside a <template>, never rendered'
+      });
+    }
+    for (const el of document.querySelectorAll('noscript')) {
+      sources.push({
+        el,
+        text: el.textContent || '',
+        note: 'inside <noscript>, not shown when scripts run'
+      });
+    }
+    for (const el of document.querySelectorAll('slot')) {
+      const assigned = el.assignedNodes ? el.assignedNodes() : [];
+      sources.push({
+        el,
+        text: assigned.length > 0 ? '' : el.textContent || '',
+        note: 'unused <slot> fallback content'
+      });
+    }
+
+    for (const src of sources) {
+      const text = normalise(src.text);
+      if (text.length < MIN_TEXT_LEN || text.length > MAX_TEXT_LEN) continue;
+      const { hits, score } = matchPatterns(text);
+      if (hits.length === 0) continue;
+      findings.push(
+        buildFinding({
+          vector: 'template',
+          text,
+          hits,
+          keywordScore: score,
+          flags: [src.note],
+          element: describe(src.el),
+          a11y: false
+        })
+      );
+    }
+    return findings;
   }
+
+  /** Decode Unicode tag characters (U+E0000 block) back to the ASCII they carry. */
+  function decodeTagChars(text) {
+    let out = '';
+    for (const ch of text) {
+      const cp = ch.codePointAt(0);
+      if (cp >= 0xe0000 && cp <= 0xe007f) {
+        const ascii = cp - 0xe0000;
+        if (ascii >= 0x20 && ascii <= 0x7e) out += String.fromCharCode(ascii);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The one vector that does not need a keyword hit. A run of zero-width or tag
+   * characters in body text has essentially no legitimate use, and tag-character
+   * smuggling renders as literally nothing.
+   */
+  function scanInvisibleUnicode() {
+    const findings = [];
+    if (!document.body) return findings;
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const seen = new Set();
+    let node = walker.nextNode();
+
+    while (node) {
+      const raw = node.nodeValue || '';
+      const parent = node.parentElement;
+
+      if (raw && parent && !SKIP_TAGS.has(parent.tagName) && INVISIBLE_RUN.test(raw)) {
+        const invisible = raw.match(INVISIBLE_CHARS) || [];
+        const smuggled = raw.match(TAG_CHARS) ? decodeTagChars(raw) : '';
+        const visible = normalise(raw);
+        const element = describe(parent);
+        const key = `${element}|${visible}`;
+
+        if (!seen.has(key)) {
+          seen.add(key);
+
+          const text = smuggled
+            ? `${invisible.length} invisible characters decode to: "${smuggled}"`
+            : `${invisible.length} invisible characters hidden in: "${visible || '(no visible text)'}"`;
+
+          const hits = [
+            {
+              id: 'invisible-unicode',
+              label: smuggled
+                ? 'Unicode tag characters carrying hidden text'
+                : 'run of zero-width characters',
+              weight: UNICODE_WEIGHT
+            }
+          ];
+
+          // If the smuggled payload itself reads like an injection, that is
+          // worth more than the concealment alone.
+          const inner = smuggled ? matchPatterns(smuggled) : { hits: [], score: 0 };
+
+          findings.push(
+            buildFinding({
+              vector: 'unicode',
+              text,
+              hits: [...hits, ...inner.hits],
+              keywordScore: UNICODE_WEIGHT + inner.score,
+              flags: ['invisible to human readers'],
+              element,
+              a11y: false
+            })
+          );
+        }
+      }
+      node = walker.nextNode();
+    }
+    return findings;
+  }
+
+  // ------------------------------------------------------------------ scoring
 
   function dedupe(findings) {
     const seen = new Set();
     const out = [];
     for (const f of findings) {
-      const key = `${f.type}|${f.element}|${f.preview}`;
+      const key = `${f.vector}|${f.element}|${f.preview}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(f);
@@ -372,16 +668,31 @@
     return 'high';
   }
 
+  /** Many small findings across a page are worse than one. Deliberately mild. */
+  function densityMultiplier(count) {
+    if (count <= DENSITY_FLOOR) return 1;
+    return Math.min(DENSITY_MAX, 1 + (count - DENSITY_FLOOR) * DENSITY_STEP);
+  }
+
   function buildResult(findings, reason) {
     const ranked = dedupe(findings).sort((a, b) => b.score - a.score);
     const trimmed = ranked.slice(0, MAX_FINDINGS);
-    const total = ranked.reduce((sum, f) => sum + f.score, 0);
+
+    const raw = ranked.reduce((sum, f) => sum + f.score, 0);
+    const multiplier = densityMultiplier(ranked.length);
+    const total = Math.round(raw * multiplier);
+
+    const vectors = {};
+    for (const f of ranked) vectors[f.vector] = (vectors[f.vector] || 0) + 1;
 
     return {
       level: levelFor(total),
       score: total,
+      rawScore: raw,
+      density: Number(multiplier.toFixed(2)),
       findingCount: ranked.length,
       truncated: ranked.length > trimmed.length,
+      vectors,
       findings: trimmed,
       url: location.href,
       title: document.title || location.hostname,
@@ -399,12 +710,16 @@
     }
   }
 
+  // ----------------------------------------------------------------- lifecycle
+
   let scanning = false;
 
   async function scan(reason) {
     if (scanning || !document.body) return;
     scanning = true;
     try {
+      await loadPatterns();
+
       const candidates = collectTextCandidates();
 
       // Style reads over many elements are batched into a single animation
@@ -417,14 +732,35 @@
             })
           : classifyCandidates(candidates);
 
-      const findings = [...classified, ...scanComments(), ...scanAttributes(), ...scanMeta()];
+      const findings = [
+        ...classified,
+        ...scanComments(),
+        ...scanAttributes(),
+        ...scanMeta(),
+        ...scanInertContainers(),
+        ...scanInvisibleUnicode()
+      ];
+
       await send(buildResult(findings, reason));
+    } catch (err) {
+      // Never fail silently: a scanner that reports "safe" because it crashed
+      // is worse than no scanner at all.
+      await send({
+        level: 'error',
+        score: 0,
+        findingCount: 0,
+        findings: [],
+        vectors: {},
+        error: String((err && err.message) || err),
+        url: location.href,
+        title: document.title || location.hostname,
+        scannedAt: Date.now(),
+        reason
+      });
     } finally {
       scanning = false;
     }
   }
-
-  // --------------------------------------------------------------- lifecycle
 
   let debounceTimer = null;
 
@@ -436,28 +772,29 @@
     }, MUTATION_DEBOUNCE_MS);
   }
 
-  function significantMutation(records) {
+  /** Only added content matters. Attribute churn - class toggles, ARIA state,
+   *  framework bookkeeping - fires constantly and told us nothing. */
+  function addedContent(records) {
     for (const r of records) {
-      if (r.type === 'attributes') return true;
-      if (r.addedNodes.length > 0) return true;
       if (r.type === 'characterData') return true;
+      for (const node of r.addedNodes) {
+        if (node.nodeType === 1 || node.nodeType === 3 || node.nodeType === 8) return true;
+      }
     }
     return false;
   }
 
   const observer = new MutationObserver((records) => {
-    if (significantMutation(records)) scheduleScan('mutation');
+    if (addedContent(records)) scheduleScan('mutation');
   });
 
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ['style', 'class', 'hidden', ...ATTRIBUTES]
+    characterData: true
   });
 
-  window.__PROMPT_INJECTION_SNIFFER__ = {
+  window.__SNEPPARD_SNIFFER__ = {
     rescan: (reason) => scan(reason || 'manual')
   };
 

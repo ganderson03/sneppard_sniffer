@@ -2,14 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Prompt Injection Sniffer</title>
+    <title>Sneppard Sniffer</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <header class="bar">
-      <span class="bar__mark">◆</span>
-      <span class="bar__title">PROMPT INJECTION SNIFFER</span>
-      <span class="bar__version">v0.1.0</span>
+      <img class="bar__mark" src="../icons/icon-48.png" alt="" width="20" height="20" />
+      <span class="bar__title">SNEPPARD SNIFFER</span>
+      <span class="bar__version">v0.2.0</span>
     </header>
 
     <section id="status" class="status status--unknown">
@@ -19,6 +19,8 @@
     </section>
 
     <main id="body">
+      <p id="vectors" class="vectors" hidden></p>
+
       <div id="empty" class="empty" hidden>
         <p class="empty__line">No hidden instructions found on this page.</p>
         <p class="empty__note">

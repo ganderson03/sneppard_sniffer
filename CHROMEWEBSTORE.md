@@ -1,4 +1,4 @@
-# Chrome Web Store listing — Prompt Injection Sniffer
+# Chrome Web Store listing — Sneppard Sniffer
 
 Everything below is ready to paste into the Web Store developer dashboard.
 
@@ -6,7 +6,7 @@ Everything below is ready to paste into the Web Store developer dashboard.
 
 ## Item name
 
-Prompt Injection Sniffer
+Sneppard Sniffer
 
 ## Short description (132 characters max)
 
@@ -44,16 +44,20 @@ it is used to skew shopping recommendations, to suppress competitors, to plant
 false claims in summaries, and — at the serious end — to try to make an agent
 leak your data or take actions you never asked for.
 
-**Prompt Injection Sniffer reads every page you visit and tells you when
+**Sneppard Sniffer reads every page you visit and tells you when
 something is hiding in it.**
 
 ### What you get
 
 - **A traffic-light verdict in the toolbar.** No badge means the page is clean.
-  An amber, orange, or red mark means there is something to look at.
+  An amber, rust, or oxblood mark means there is something to look at.
 - **Plain-English findings.** Click the icon and you see exactly what was found,
   the actual hidden text, and how it was concealed — "text colour matches
   background", "positioned far off-screen", "hidden in an HTML comment".
+- **Tricks you cannot see at all.** Invisible Unicode characters that smuggle a
+  written instruction into ordinary-looking text are decoded and shown back to
+  you in plain English, and keywords disguised with Cyrillic or Greek lookalike
+  letters are unmasked before checking.
 - **Live re-checking.** Modern sites load content after the page appears. The
   scanner re-checks automatically when the page changes.
 - **A re-scan button**, for when you want to check again yourself.
@@ -88,7 +92,7 @@ Made by [sneppard.dev](https://sneppard.dev).
 
 ## Single purpose statement
 
-Prompt Injection Sniffer has one purpose: to analyse the content of the web page
+Sneppard Sniffer has one purpose: to analyse the content of the web page
 the user is viewing and warn the user when that page contains concealed text
 matching known prompt-injection patterns targeting AI assistants.
 
@@ -135,6 +139,13 @@ solves. Broad host access is required so the detector's content script runs on
 every page the user opens. The content script only reads the page's existing DOM
 in place; it never modifies pages and never transmits their content.
 
+### `web_accessible_resources`
+
+One file, `src/patterns.js`, is web-accessible. It is the extension's own
+keyword list, and the content script loads it with a dynamic `import()` of a
+`chrome-extension://` URL. It contains no executable behaviour beyond exporting
+an array of regular expressions, and it is never fetched from the network.
+
 ### Remote code
 
 **No remote code is used.** All JavaScript is bundled in the extension package.
@@ -170,9 +181,9 @@ Certification checkboxes — all three can be truthfully checked:
 ## Privacy policy
 
 *Host this text at a public URL and put that URL in the dashboard's "Privacy
-policy URL" field — for example `https://sneppard.dev/prompt-injection-sniffer/privacy`.*
+policy URL" field — for example `https://sneppard.dev/sneppard-sniffer/privacy`.*
 
-**Prompt Injection Sniffer — Privacy Policy**
+**Sneppard Sniffer — Privacy Policy**
 Last updated: 31 July 2026
 
 **The short version: no data leaves your device. Nothing is transmitted,
@@ -217,8 +228,8 @@ at this URL with a new "last updated" date before the change takes effect.
 
 | Asset | Requirement | Status |
 | --- | --- | --- |
-| Icon | 128×128 PNG | **To do** — the package currently ships no icons and uses Chrome's default puzzle piece. An icon is required before publishing. |
-| Screenshots | 1–5 at 1280×800 or 640×400 | **To do** — suggested: (1) red HIGH verdict with findings, (2) green SAFE verdict, (3) the badge on the toolbar over a real page |
+| Icon | 128×128 PNG | **Done** — `icons/icon-128.png`, the park-poster snow leopard eye. 16 and 48 ship alongside it. Regenerate with `python tools/generate-icons.py`. |
+| Screenshots | 1–5 at 1280×800 or 640×400 | **To do — must be regenerated.** Any existing screenshots show the old dark-terminal popup and the old product name; both changed in 0.2.0. Suggested: (1) oxblood HIGH verdict with findings, (2) pine SAFE verdict, (3) the badge on the toolbar over a real page |
 | Small promo tile | 440×280 PNG | Optional |
 | Marquee promo tile | 1400×560 PNG | Optional |
 | Privacy policy URL | Public URL | **To do** — publish the policy above |
@@ -236,9 +247,30 @@ Suggested screenshot captions:
 *Optional field, but it shortens review.*
 
 The extension is entirely self-contained and offline. To verify behaviour, load
-the unpacked extension and open the bundled test fixture at
-`test/injection-fixture.html` — a mock product page carrying eight deliberately
-planted injections (hidden div, white-on-white text, off-screen block,
-clip-path'd block, HTML comment, `alt` attribute, `title` attribute, and a
-`meta description`). The toolbar badge should turn red with `!!!` and the popup
-should list all eight. Any ordinary web page should produce no badge.
+the unpacked extension and open the two bundled fixtures.
+
+`test/injection-fixture.html` is a mock product page carrying fourteen
+deliberately planted injections: hidden div, white-on-white 1px text, off-screen
+block, clip-path'd block, HTML comment, `alt` attribute, `title` attribute,
+`data-*` attribute, an abused `.sr-only` block, Unicode tag characters, a
+zero-width run, Cyrillic homoglyphs, `<template>` content, and a `<noscript>`
+body. The toolbar badge should turn oxblood with `!!!` and the popup should list
+all of them.
+
+`test/benign-fixture.html` is the control: an article that quotes and explains
+real injection phrasing, plus hidden nav, `.sr-only` labels, an `opacity:0`
+tooltip, a closed `<details>` and `<select>` options. It should produce no badge
+at all. Any ordinary web page should likewise produce no badge.
+
+---
+
+## Version history
+
+**0.2.0** — Renamed from "Prompt Injection Sniffer" to **Sneppard Sniffer**.
+New park-poster icon set and retheme of the popup. Four new detection vectors
+(invisible Unicode, homoglyphs, `data-*` attributes, inert containers), score
+capping and a density factor, and several false-positive guards
+(accessibility-class demotion, quoted/explanatory text, `<select>` and closed
+`<details>`). **Store screenshots must be regenerated for this release.**
+
+**0.1.0** — Initial release.

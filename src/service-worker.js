@@ -1,18 +1,21 @@
 /**
- * Prompt Injection Sniffer - MV3 service worker.
+ * Sneppard Sniffer - MV3 service worker.
  *
  * The worker is evicted whenever the browser feels like it, so it holds no
  * state in module scope. Everything lives in chrome.storage.local, keyed by
- * `tab_{tabId}`, and the badge is always written with an explicit tabId.
+ * `tab_{tabId}`, and every action call is written with an explicit tabId.
  */
 
 const KEY_PREFIX = 'tab_';
+const PRODUCT = 'Sneppard Sniffer';
 
+// Badge colours follow the park-poster palette used by the popup.
 const BADGE = {
-  safe: { text: '', color: '#1f8f4e' },
-  low: { text: '!', color: '#c8951a' },
-  medium: { text: '!!', color: '#d1691f' },
-  high: { text: '!!!', color: '#cc2b3d' }
+  safe: { text: '', color: '#3E4E40' },
+  low: { text: '!', color: '#A8853F' },
+  medium: { text: '!!', color: '#B04A2C' },
+  high: { text: '!!!', color: '#7A2C26' },
+  error: { text: '?', color: '#5C544C' }
 };
 
 function keyFor(tabId) {
@@ -24,6 +27,7 @@ async function setBadge(tabId, level) {
   try {
     await chrome.action.setBadgeText({ tabId, text: badge.text });
     await chrome.action.setBadgeBackgroundColor({ tabId, color: badge.color });
+    await chrome.action.setTitle({ tabId, title: `${PRODUCT} — ${String(level).toUpperCase()}` });
   } catch (err) {
     // Tab closed between the scan and the badge write. Nothing to do.
   }
@@ -32,6 +36,7 @@ async function setBadge(tabId, level) {
 async function clearBadge(tabId) {
   try {
     await chrome.action.setBadgeText({ tabId, text: '' });
+    await chrome.action.setTitle({ tabId, title: PRODUCT });
   } catch (err) {
     // Same as above - the tab is gone.
   }
